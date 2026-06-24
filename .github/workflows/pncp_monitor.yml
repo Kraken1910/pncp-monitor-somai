@@ -1,0 +1,39 @@
+name: PNCP Monitor - Robótica Educacional
+
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  monitorar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Rodar monitor - Editais publicados (Brasil inteiro)
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_REMETENTE: ${{ secrets.SMTP_USER }}
+          EMAIL_DESTINATARIOS: ${{ secrets.EMAIL_DESTINATARIOS }}
+        run: |
+          python3 pncp_monitor.py --modo publicacao --dias 1 --saida achados_publicacao.json
+
+      - name: Salvar resultados como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: pncp-achados-${{ github.run_number }}
+          path: achados_publicacao.json
+          retention-days: 90
