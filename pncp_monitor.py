@@ -18,9 +18,11 @@ Uso típico (cron diário ao fim da tarde):
 import argparse
 import json
 import os
+import re
 import smtplib
 import sys
 import time
+import unicodedata
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -279,12 +281,37 @@ def paginar(endpoint: str, params: Dict[str, Any], contexto: str = "") -> Iterat
             time.sleep(SLEEP_BETWEEN_PAGES)
 
 
+# Pré-compila um regex por palavra-chave, usando \b (limite de palavra) para
+# que "stem" NÃO bata dentro de "sistema", "blockly" não bata dentro de
+# outra palavra maior, etc. Sem isso, termos curtos geram falsos positivos
+# massivos (ex: toda licitação que menciona "Sistema de Registro de Preços"
+# batia com "stem").
+#
+# Também normaliza acentos (remove diacríticos) antes de comparar, para que
+# não seja necessário manter duas entradas manuais para cada palavra-chave
+# ("robotica" e "robótica") — "robótica" e "robotica" passam a ser
+# equivalentes automaticamente.
+
+
+def _remover_acentos(texto: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", texto)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+_REGEX_PALAVRAS_CHAVE = {
+    kw: re.compile(r"\b" + re.escape(_remover_acentos(kw).lower()) + r"\b")
+    for kw in PALAVRAS_CHAVE
+}
+
+
 def bate_palavra_chave(texto: str) -> List[str]:
-    """Retorna a lista de palavras-chave encontradas em um texto (case-insensitive)."""
+    """Retorna a lista de palavras-chave encontradas em um texto, ignorando
+    acentos e respeitando limite de palavra (não casa substring dentro de
+    outra palavra, ex: 'stem' não bate dentro de 'sistema')."""
     if not texto:
         return []
-    texto_lower = texto.lower()
-    return [kw for kw in PALAVRAS_CHAVE if kw in texto_lower]
+    texto_normalizado = _remover_acentos(texto).lower()
+    return [kw for kw, regex in _REGEX_PALAVRAS_CHAVE.items() if regex.search(texto_normalizado)]
 
 
 # ---------------------------------------------------------------------------
