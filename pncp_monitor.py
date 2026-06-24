@@ -41,7 +41,7 @@ EMAIL_DESTINATARIOS = [
 ]
 
 BASE_URL = "https://pncp.gov.br/api/consulta"
-TAMANHO_PAGINA = 500  # máximo permitido pela API
+TAMANHO_PAGINA = 100  # a API rejeitou 500 com "Tamanho de página inválido"; testando 100
 TIMEOUT = 60
 RETRY = 5
 SLEEP_BETWEEN_PAGES = 0.3  # seja gentil com a API pública
@@ -164,11 +164,12 @@ CODIGOS_CATMAT_PCA = [
 ]
 
 
-def _get(url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _get(url: str, params: Dict[str, Any]):
     """GET com retry e backoff. Retorna None em caso de resposta vazia (204).
     Erros 4xx (requisição malformada) NÃO são tentados de novo, pois são
     definitivos — repetir não muda o resultado. Erros 5xx/timeout/conexão
-    SÃO tentados de novo (podem ser instabilidade temporária)."""
+    SÃO tentados de novo (podem ser instabilidade temporária).
+    Em erro 4xx, retorna a tupla ("__ERRO_4XX__", corpo_da_resposta_texto)."""
     for attempt in range(1, RETRY + 1):
         try:
             resp = requests.get(url, params=params, timeout=TIMEOUT)
@@ -182,7 +183,7 @@ def _get(url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     f"  corpo da resposta: {resp.text[:500]}",
                     file=sys.stderr,
                 )
-                return "__ERRO_4XX__"
+                return ("__ERRO_4XX__", resp.text)
 
             resp.raise_for_status()  # levanta para 5xx, tratado abaixo como retryable
             return resp.json()
@@ -197,17 +198,54 @@ def _get(url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def paginar(endpoint: str, params: Dict[str, Any], contexto: str = "") -> Iterator[Dict[str, Any]]:
     """Itera por todas as páginas de um endpoint do PNCP, sempre cedendo
     cada registro individual (item de 'data'). Em caso de falha de conexão
-    (não confundir com "sem resultados"), registra em ERROS_CONEXAO."""
+    (não confundir com "sem resultados"), registra em ERROS_CONEXAO.
+    Se a API rejeitar o tamanho de página, tenta automaticamente valores
+    menores antes de desistir."""
     url = f"{BASE_URL}{endpoint}"
     pagina = 1
     total_paginas = 1
+    tamanhos_para_tentar = [TAMANHO_PAGINA, 50, 20, 10]
+    tamanho_confirmado = None  # uma vez descoberto, reutiliza nas próximas páginas
 
     while pagina <= total_paginas:
-        query = dict(params)
-        query["pagina"] = pagina
-        query["tamanhoPagina"] = TAMANHO_PAGINA
+        body = None
+        tamanho_usado = None
+        todos_tamanhos_falharam = True
 
-        body = _get(url, query)
+        candidatos = [tamanho_confirmado] if tamanho_confirmado else tamanhos_para_tentar
+
+        for tamanho in candidatos:
+            query = dict(params)
+            query["pagina"] = pagina
+            query["tamanhoPagina"] = tamanho
+
+            resultado = _get(url, query)
+
+            if isinstance(resultado, tuple) and resultado[0] == "__ERRO_4XX__":
+                corpo = resultado[1] or ""
+                if "tamanho de p" in corpo.lower() or "tamanhopagina" in corpo.lower():
+                    print(f"  -> tamanhoPagina={tamanho} rejeitado, tentando valor menor...")
+                    continue  # tenta o próximo tamanho da lista
+                # Outro tipo de erro 4xx, não relacionado a tamanho de página
+                body = "__ERRO_4XX__"
+                todos_tamanhos_falharam = False
+                break
+
+            # Sucesso (dict) ou erro de conexão (string) — não tem mais a ver
+            # com tamanho de página, então não continua tentando tamanhos.
+            body = resultado
+            tamanho_usado = tamanho
+            todos_tamanhos_falharam = False
+            break
+
+        if not todos_tamanhos_falharam and isinstance(body, dict):
+            tamanho_confirmado = tamanho_usado
+
+        if todos_tamanhos_falharam:
+            msg = f"{contexto} (página {pagina}): API rejeitou todos os tamanhos de página testados {tamanhos_para_tentar}"
+            print(f"[ERRO 4xx] {msg}", file=sys.stderr)
+            ERROS_CONEXAO.append(msg)
+            break
 
         if body == "__ERRO_4XX__":
             msg = f"{contexto} (página {pagina}): requisição rejeitada pela API (400/4xx) — ver corpo da resposta no log acima"
@@ -231,7 +269,7 @@ def paginar(endpoint: str, params: Dict[str, Any], contexto: str = "") -> Iterat
         total_paginas = body.get("totalPaginas", 1)
 
         if pagina == 1:
-            print(f"  -> totalRegistros={total_registros} totalPaginas={total_paginas}")
+            print(f"  -> totalRegistros={total_registros} totalPaginas={total_paginas} (tamanhoPagina={tamanho_usado})")
 
         for item in registros:
             yield item
