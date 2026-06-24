@@ -84,31 +84,76 @@ MODALIDADES_PADRAO = [6, 7, 8, 4, 5]
 # e os equipamentos "de prateleira" do catálogo Somai.
 # ---------------------------------------------------------------------------
 PALAVRAS_CHAVE = [
+    # Robótica educacional — termos genéricos
     "robotica educacional",
     "robótica educacional",
     "robo educacional",
     "robô educacional",
     "kit de robotica",
     "kit robotica",
-    "dash robot",
-    "robot dash",
-    "wonder workshop",
-    "stem",
-    "programacao para criancas",
-    "programação para crianças",
-    "pensamento computacional",
-    "cultura maker",
-    "espaco maker",
-    "espaço maker",
     "laboratorio de robotica",
     "laboratório de robótica",
-    "impressora 3d educacional",
     "kit maker",
+    "impressora 3d educacional",
+
+    # Marcas / produtos específicos distribuídos pela Somai
+    "dash robot",
+    "robot dash",
+    "dash robo",
+    "robo dash",
+    "wonder workshop",
+    "unitree",
+    "cyberdog",
+    "pepper",
+    "nao robo",
+    "robo nao",
+    "robo humanoide",
+    "humanoide robo",
+    "humanoide",
+
+    # Aplicações / casos de uso de robôs humanoides e de serviço
+    "aspirador robo",
+    "robo aspirador",
+    "robo limpeza",
+    "robo de limpeza",
+    "robo atendimento",
+    "atendimento robo",
+    "concierge robo",
+    "robo concierge",
+
+    # STEM / cultura maker / metodologia
+    "stem",
+    "steam",
+    "cultura maker",
+    "maker",
+    "espaco maker",
+    "espaço maker",
+    "sala tecnologica educacional",
+    "sala tecnológica educacional",
+    "pensamento computacional",
+    "programacao para criancas",
+    "programação para crianças",
+    "programacao educacional",
+    "programação educacional",
     "scratch",
     "blockly",
     "lego education",
+    "kit lego",
+    "lego kit",
     "vex robotics",
     "arduino educacional",
+    "arduino",
+    "kit arduino",
+
+    # IA / formação / plataforma
+    "curso ia",
+    "ia curso",
+    "formacao de professores",
+    "formação de professores",
+    "material pedagogico",
+    "material pedagógico",
+    "lms",
+    "plataforma de aprendizagem",
 ]
 
 # Códigos de CLASSE (não o código do item/PDM) usados no parâmetro
@@ -120,21 +165,33 @@ CODIGOS_CATMAT_PCA = [
 
 
 def _get(url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """GET com retry e backoff. Retorna None em caso de falha total ou
-    resposta vazia (204)."""
+    """GET com retry e backoff. Retorna None em caso de resposta vazia (204).
+    Erros 4xx (requisição malformada) NÃO são tentados de novo, pois são
+    definitivos — repetir não muda o resultado. Erros 5xx/timeout/conexão
+    SÃO tentados de novo (podem ser instabilidade temporária)."""
     for attempt in range(1, RETRY + 1):
         try:
             resp = requests.get(url, params=params, timeout=TIMEOUT)
             if resp.status_code == 204:
                 return None  # sem conteúdo (sem resultados) — não é erro
-            resp.raise_for_status()
+
+            if 400 <= resp.status_code < 500:
+                # Erro definitivo do lado do request — não adianta repetir.
+                print(
+                    f"[ERRO 4xx - NÃO REPETÍVEL] status={resp.status_code} url={resp.url}\n"
+                    f"  corpo da resposta: {resp.text[:500]}",
+                    file=sys.stderr,
+                )
+                return "__ERRO_4XX__"
+
+            resp.raise_for_status()  # levanta para 5xx, tratado abaixo como retryable
             return resp.json()
         except requests.exceptions.RequestException as exc:
             print(f"[aviso] tentativa {attempt}/{RETRY} falhou: {exc}", file=sys.stderr)
             if attempt == RETRY:
-                return "__ERRO__"  # sentinela: falha real, distinto de "sem resultados"
+                return "__ERRO_CONEXAO__"
             time.sleep(SLEEP_BASE_RETRY * attempt)
-    return "__ERRO__"
+    return "__ERRO_CONEXAO__"
 
 
 def paginar(endpoint: str, params: Dict[str, Any], contexto: str = "") -> Iterator[Dict[str, Any]]:
@@ -152,7 +209,13 @@ def paginar(endpoint: str, params: Dict[str, Any], contexto: str = "") -> Iterat
 
         body = _get(url, query)
 
-        if body == "__ERRO__":
+        if body == "__ERRO_4XX__":
+            msg = f"{contexto} (página {pagina}): requisição rejeitada pela API (400/4xx) — ver corpo da resposta no log acima"
+            print(f"[ERRO 4xx] {msg}", file=sys.stderr)
+            ERROS_CONEXAO.append(msg)
+            break
+
+        if body == "__ERRO_CONEXAO__":
             msg = f"{contexto} (página {pagina}): falha de conexão após {RETRY} tentativas"
             print(f"[ERRO DE CONEXÃO] {msg}", file=sys.stderr)
             ERROS_CONEXAO.append(msg)
