@@ -46,8 +46,9 @@ BASE_URL = "https://pncp.gov.br/api/consulta"
 TAMANHO_PAGINA = 100  # a API rejeitou 500 com "Tamanho de página inválido"; testando 100
 TIMEOUT = 60
 RETRY = 5
-SLEEP_BETWEEN_PAGES = 0.3  # seja gentil com a API pública
-SLEEP_BASE_RETRY = 5  # segundos, multiplicado pela tentativa (backoff)
+SLEEP_BETWEEN_PAGES = 1.5  # seja gentil com a API pública (evita bloqueio anti-bot)
+SLEEP_BASE_RETRY = 8  # segundos, multiplicado pela tentativa (backoff)
+SLEEP_ENTRE_MODALIDADES = 3  # pausa entre cada modalidade consultada
 
 # Lista global de falhas de conexão da execução atual — usada para que o
 # agente NUNCA reporte silenciosamente "nenhuma oportunidade encontrada"
@@ -166,12 +167,26 @@ CODIGOS_CATMAT_PCA = [
 ]
 
 
+def _parece_pagina_bloqueio(resp) -> bool:
+    """Detecta se a resposta é uma página HTML de bloqueio (WAF/anti-bot),
+    em vez de um JSON de erro estruturado da própria API do PNCP."""
+    content_type = resp.headers.get("Content-Type", "").lower()
+    if "html" in content_type:
+        return True
+    texto = resp.text[:300].lower()
+    return "<html" in texto or "support id" in texto or "<!doctype" in texto
+
+
 def _get(url: str, params: Dict[str, Any]):
-    """GET com retry e backoff. Retorna None em caso de resposta vazia (204).
-    Erros 4xx (requisição malformada) NÃO são tentados de novo, pois são
-    definitivos — repetir não muda o resultado. Erros 5xx/timeout/conexão
-    SÃO tentados de novo (podem ser instabilidade temporária).
-    Em erro 4xx, retorna a tupla ("__ERRO_4XX__", corpo_da_resposta_texto)."""
+    """GET com retry e backoff.
+    - 204: sem conteúdo (sem resultados), não é erro.
+    - 4xx com corpo JSON estruturado: erro definitivo do PNCP (ex: parâmetro
+      inválido) — NÃO repete, pois repetir não muda o resultado.
+    - 4xx com corpo HTML (página de bloqueio de firewall/anti-bot): trata
+      como temporário e TENTA DE NOVO com espera maior, pois geralmente é
+      bloqueio por excesso de requisições, não erro real de parâmetro.
+    - 5xx/timeout/conexão: também tentado de novo (instabilidade temporária).
+    Em erro 4xx definitivo, retorna a tupla ("__ERRO_4XX__", corpo_da_resposta)."""
     for attempt in range(1, RETRY + 1):
         try:
             resp = requests.get(url, params=params, timeout=TIMEOUT)
@@ -179,7 +194,19 @@ def _get(url: str, params: Dict[str, Any]):
                 return None  # sem conteúdo (sem resultados) — não é erro
 
             if 400 <= resp.status_code < 500:
-                # Erro definitivo do lado do request — não adianta repetir.
+                if _parece_pagina_bloqueio(resp):
+                    print(
+                        f"[aviso] tentativa {attempt}/{RETRY}: parece bloqueio "
+                        f"anti-bot (status={resp.status_code}, resposta HTML) — "
+                        f"aguardando mais tempo antes de tentar de novo",
+                        file=sys.stderr,
+                    )
+                    if attempt == RETRY:
+                        return "__ERRO_CONEXAO__"
+                    time.sleep(SLEEP_BASE_RETRY * attempt * 2)  # backoff bem maior
+                    continue
+
+                # Erro definitivo e estruturado do lado do request.
                 print(
                     f"[ERRO 4xx - NÃO REPETÍVEL] status={resp.status_code} url={resp.url}\n"
                     f"  corpo da resposta: {resp.text[:500]}",
@@ -326,7 +353,9 @@ def monitorar_publicacao(
 ) -> List[Dict[str, Any]]:
     modalidades = modalidades or MODALIDADES_PADRAO
     achados = []
-    for codigo_modalidade in modalidades:
+    for indice, codigo_modalidade in enumerate(modalidades):
+        if indice > 0:
+            time.sleep(SLEEP_ENTRE_MODALIDADES)
         nome_modalidade = MODALIDADES.get(codigo_modalidade, "?")
         print(f"[publicacao] {data_inicial} -> {data_final} (uf={uf}, modalidade={codigo_modalidade} - {nome_modalidade})")
         params: Dict[str, Any] = {
