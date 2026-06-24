@@ -47,6 +47,33 @@ RETRY = 3
 SLEEP_BETWEEN_PAGES = 0.3  # seja gentil com a API pública
 
 # ---------------------------------------------------------------------------
+# Tabela de domínio oficial "Modalidade da Contratação". A API EXIGE esse
+# parâmetro em /contratacoes/publicacao e /contratacoes/proposta — não é
+# opcional, então o agente roda em loop por cada modalidade da lista padrão
+# e agrega os resultados.
+# ---------------------------------------------------------------------------
+MODALIDADES = {
+    1: "Leilão - Eletrônico",
+    2: "Diálogo Competitivo",
+    3: "Concurso",
+    4: "Concorrência - Eletrônica",
+    5: "Concorrência - Presencial",
+    6: "Pregão - Eletrônico",
+    7: "Pregão - Presencial",
+    8: "Dispensa de Licitação",
+    9: "Inexigibilidade",
+    10: "Manifestação de Interesse",
+    11: "Pré-qualificação",
+    12: "Credenciamento",
+    13: "Leilão - Presencial",
+    14: "Inaplicabilidade da Licitação",
+}
+
+# Modalidades mais relevantes para compra de robôs/kits educacionais
+# (pregão e dispensa cobrem a grande maioria dos casos no setor público).
+MODALIDADES_PADRAO = [6, 7, 8, 4, 5]
+
+# ---------------------------------------------------------------------------
 # Palavras-chave estratégicas — ajuste conforme seus 3 modelos exclusivos
 # e os equipamentos "de prateleira" do catálogo Somai.
 # ---------------------------------------------------------------------------
@@ -149,28 +176,30 @@ def monitorar_publicacao(
     data_inicial: str,
     data_final: str,
     uf: Optional[str] = None,
-    codigo_modalidade: Optional[int] = None,
+    modalidades: Optional[List[int]] = None,
     codigo_municipio_ibge: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    print(f"[publicacao] {data_inicial} -> {data_final} (uf={uf}, modalidade={codigo_modalidade})")
-    params: Dict[str, Any] = {
-        "dataInicial": data_inicial,
-        "dataFinal": data_final,
-    }
-    if uf:
-        params["uf"] = uf
-    if codigo_modalidade:
-        params["codigoModalidadeContratacao"] = codigo_modalidade
-    if codigo_municipio_ibge:
-        params["codigoMunicipioIbge"] = codigo_municipio_ibge
-
+    modalidades = modalidades or MODALIDADES_PADRAO
     achados = []
-    for item in paginar("/v1/contratacoes/publicacao", params):
-        objeto = item.get("objetoCompra", "") or ""
-        hits = bate_palavra_chave(objeto)
-        if hits:
-            item["_palavras_chave_encontradas"] = hits
-            achados.append(item)
+    for codigo_modalidade in modalidades:
+        nome_modalidade = MODALIDADES.get(codigo_modalidade, "?")
+        print(f"[publicacao] {data_inicial} -> {data_final} (uf={uf}, modalidade={codigo_modalidade} - {nome_modalidade})")
+        params: Dict[str, Any] = {
+            "dataInicial": data_inicial,
+            "dataFinal": data_final,
+            "codigoModalidadeContratacao": codigo_modalidade,  # obrigatório na API
+        }
+        if uf:
+            params["uf"] = uf
+        if codigo_municipio_ibge:
+            params["codigoMunicipioIbge"] = codigo_municipio_ibge
+
+        for item in paginar("/v1/contratacoes/publicacao", params):
+            objeto = item.get("objetoCompra", "") or ""
+            hits = bate_palavra_chave(objeto)
+            if hits:
+                item["_palavras_chave_encontradas"] = hits
+                achados.append(item)
     return achados
 
 
@@ -358,7 +387,10 @@ def main():
     parser.add_argument("--data-final", help="AAAAMMDD (sobrescreve --dias)")
     parser.add_argument("--uf", help="Sigla do estado, ex: SP")
     parser.add_argument("--municipio-ibge", help="Código IBGE do município")
-    parser.add_argument("--modalidade", type=int, help="codigoModalidadeContratacao")
+    parser.add_argument(
+        "--modalidades", type=int, nargs="*",
+        help="Lista de codigoModalidadeContratacao (padrão: pregão/dispensa/concorrência)",
+    )
     parser.add_argument("--cnpj-orgao", help="CNPJ do órgão (modo atas)")
     parser.add_argument("--ano", type=int, help="anoPca (modo pca)")
     parser.add_argument("--catmat", nargs="*", help="Códigos CATMAT (modo pca)")
@@ -373,7 +405,7 @@ def main():
     if args.modo == "publicacao":
         achados = monitorar_publicacao(
             data_inicial, data_final, uf=args.uf,
-            codigo_modalidade=args.modalidade,
+            modalidades=args.modalidades,
             codigo_municipio_ibge=args.municipio_ibge,
         )
         enviar_alerta(achados, "Editais/Avisos Publicados")
