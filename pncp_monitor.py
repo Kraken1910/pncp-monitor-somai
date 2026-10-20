@@ -34,7 +34,15 @@ import requests
 # Configuração de e-mail (via variáveis de ambiente / GitHub Secrets)
 # ---------------------------------------------------------------------------
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+def _porta_smtp() -> int:
+    """Tolera SMTP_PORT vazio ou inválido (secret não configurado no GitHub
+    chega como string vazia — int("") derrubava o script antes de qualquer
+    consulta à API)."""
+    valor = (os.environ.get("SMTP_PORT") or "").strip()
+    return int(valor) if valor.isdigit() else 587
+
+
+SMTP_PORT = _porta_smtp()
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
 EMAIL_REMETENTE = os.environ.get("EMAIL_REMETENTE", SMTP_USER)
@@ -54,6 +62,21 @@ SLEEP_ENTRE_MODALIDADES = 3  # pausa entre cada modalidade consultada
 # agente NUNCA reporte silenciosamente "nenhuma oportunidade encontrada"
 # quando, na verdade, não conseguiu nem consultar a API.
 ERROS_CONEXAO: List[str] = []
+
+# Sessão HTTP com cabeçalhos de navegador. O WAF do PNCP bloqueia com mais
+# frequência o User-Agent padrão do python-requests; identificar-se como
+# navegador comum reduz muito as páginas HTML de bloqueio (que custavam até
+# 30 min de retries por execução).
+SESSAO = requests.Session()
+SESSAO.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "pt-BR,pt;q=0.9",
+    "Referer": "https://pncp.gov.br/app/editais",
+})
 
 # ---------------------------------------------------------------------------
 # Tabela de domínio oficial "Modalidade da Contratação". A API EXIGE esse
@@ -189,7 +212,7 @@ def _get(url: str, params: Dict[str, Any]):
     Em erro 4xx definitivo, retorna a tupla ("__ERRO_4XX__", corpo_da_resposta)."""
     for attempt in range(1, RETRY + 1):
         try:
-            resp = requests.get(url, params=params, timeout=TIMEOUT)
+            resp = SESSAO.get(url, params=params, timeout=TIMEOUT)
             if resp.status_code == 204:
                 return None  # sem conteúdo (sem resultados) — não é erro
 

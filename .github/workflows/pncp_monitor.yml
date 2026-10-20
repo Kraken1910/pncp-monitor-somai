@@ -2,12 +2,20 @@ name: PNCP Monitor - Robótica Educacional
 
 on:
   schedule:
-    - cron: "0 20 * * *"
+    - cron: "0 20 * * *"   # 17h Brasília (UTC-3); o GitHub pode atrasar até ~1h
   workflow_dispatch: {}
+
+# Necessário para o passo "Registrar sinal de vida", que faz um commit
+# diário no repositório. Sem commit há 60 dias, o GitHub DESLIGA o
+# agendamento por inatividade — foi exatamente isso que parou o robô.
+permissions:
+  contents: write
 
 jobs:
   monitorar:
     runs-on: ubuntu-latest
+    timeout-minutes: 50
+
     steps:
       - name: Checkout do repositório
         uses: actions/checkout@v4
@@ -20,10 +28,31 @@ jobs:
       - name: Instalar dependências
         run: pip install requests
 
-      - name: Rodar monitor - Editais publicados (Brasil inteiro)
+      # Mostra na tela da Action quais secrets existem (nunca o valor) e
+      # para com mensagem clara se faltar algum obrigatório. Antes, um
+      # secret ausente derrubava o script em silêncio antes da 1ª consulta.
+      - name: Verificar secrets
         env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_DESTINATARIOS: ${{ secrets.EMAIL_DESTINATARIOS }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
+        run: |
+          faltando=0
+          for v in SMTP_USER SMTP_PASS EMAIL_DESTINATARIOS; do
+            if [ -z "${!v}" ]; then echo "::error::Secret obrigatório AUSENTE: $v (Settings → Secrets and variables → Actions)"; faltando=1
+            else echo "ok: $v definido"; fi
+          done
+          [ -z "$SMTP_HOST" ] && echo "aviso: SMTP_HOST vazio — usando smtp.gmail.com" || echo "ok: SMTP_HOST definido"
+          [ -z "$SMTP_PORT" ] && echo "aviso: SMTP_PORT vazio — usando 587" || echo "ok: SMTP_PORT definido"
+          exit $faltando
+
+      - name: Rodar monitor - Editais publicados (Brasil inteiro)
+        id: monitor
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.gmail.com' }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           EMAIL_REMETENTE: ${{ secrets.SMTP_USER }}
@@ -32,8 +61,22 @@ jobs:
           python3 pncp_monitor.py --modo publicacao --dias 1 --saida achados_publicacao.json
 
       - name: Salvar resultados como artefato
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pncp-achados-${{ github.run_number }}
           path: achados_publicacao.json
           retention-days: 90
+          if-no-files-found: ignore
+
+      # Commit diário de um arquivo pequeno = atividade no repositório =
+      # o GitHub não desliga mais o cron. Roda mesmo se a busca falhar.
+      - name: Registrar sinal de vida
+        if: always()
+        run: |
+          git config user.name "pncp-monitor[bot]"
+          git config user.email "pncp-monitor@users.noreply.github.com"
+          echo "Última execução: $(date -u '+%Y-%m-%d %H:%M UTC') — resultado do monitor: ${{ steps.monitor.outcome }}" > ultima_execucao.txt
+          git add ultima_execucao.txt
+          git commit -m "sinal de vida: $(date -u '+%Y-%m-%d')" || echo "nada para commitar"
+          git push || echo "::warning::não foi possível fazer push do sinal de vida"
